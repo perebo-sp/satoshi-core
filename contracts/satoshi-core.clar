@@ -323,3 +323,158 @@
     )
   )
 )
+
+;; Borrow stablecoins against Bitcoin collateral
+(define-public (borrow-against-collateral (amount uint))
+  (begin
+    (asserts! (var-get protocol-initialized) ERR-PROTOCOL-NOT-INITIALIZED)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+
+    (let (
+        (borrowing-capacity (get-borrowing-capacity tx-sender))
+        (current-debt (get-user-debt tx-sender))
+        (accrued-interest (calculate-accrued-interest tx-sender))
+        (total-existing-debt (+ current-debt accrued-interest))
+        (new-total-debt (+ total-existing-debt amount))
+      )
+      ;; Verify borrowing doesn't exceed capacity
+      (asserts! (<= new-total-debt borrowing-capacity) ERR-EXCESSIVE-DEBT-RATIO)
+
+      ;; Update user debt position
+      (map-set user-debt-balance tx-sender new-total-debt)
+      (map-set user-last-accrual-block tx-sender stacks-block-height)
+
+      ;; Update global debt tracking
+      (var-set total-outstanding-debt (+ (var-get total-outstanding-debt) amount))
+
+      (ok true)
+    )
+  )
+)
+
+;; Repay outstanding debt (partial or full)
+(define-public (repay-debt (amount uint))
+  (begin
+    (asserts! (var-get protocol-initialized) ERR-PROTOCOL-NOT-INITIALIZED)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+
+    (let (
+        (current-debt (get-user-debt tx-sender))
+        (accrued-interest (calculate-accrued-interest tx-sender))
+        (total-debt (+ current-debt accrued-interest))
+      )
+      ;; Verify user has outstanding debt
+      (asserts! (> total-debt u0) ERR-NO-ACTIVE-POSITION)
+
+      ;; Calculate actual repayment amount (capped at total debt)
+      (let (
+          (repayment-amount (if (> amount total-debt)
+            total-debt
+            amount
+          ))
+          (remaining-debt (- total-debt repayment-amount))
+        )
+        ;; Update user debt state
+        (map-set user-debt-balance tx-sender remaining-debt)
+        (map-set user-last-accrual-block tx-sender stacks-block-height)
+
+        ;; Update global debt tracking
+        (var-set total-outstanding-debt
+          (- (var-get total-outstanding-debt) repayment-amount)
+        )
+
+        (ok true)
+      )
+    )
+  )
+)
+
+;; Liquidate under-collateralized position
+(define-public (liquidate-position
+    (borrower principal)
+    (repayment-amount uint)
+  )
+  (begin
+    (asserts! (var-get protocol-initialized) ERR-PROTOCOL-NOT-INITIALIZED)
+    (asserts! (> repayment-amount u0) ERR-INVALID-AMOUNT)
+
+    ;; Verify position is liquidatable
+    (asserts! (is-liquidatable borrower) ERR-LIQUIDATION-NOT-PERMITTED)
+
+    (let (
+        (borrower-debt (get-user-debt borrower))
+        (accrued-interest (calculate-accrued-interest borrower))
+        (total-debt (+ borrower-debt accrued-interest))
+        (borrower-collateral (get-user-collateral borrower))
+        (btc-price (var-get current-btc-price-usd))
+      )
+      ;; Cap repayment at total debt
+      (let (
+          (actual-repayment (if (> repayment-amount total-debt)
+            total-debt
+            repayment-amount
+          ))
+          (remaining-debt (- total-debt actual-repayment))
+          ;; Calculate liquidation bonus for liquidator
+          (liquidation-bonus-multiplier (+ PRECISION-FACTOR LIQUIDATION-PENALTY))
+          (collateral-to-seize (/ (* actual-repayment liquidation-bonus-multiplier)
+            (* btc-price PRECISION-FACTOR)
+          ))
+        )
+        ;; Verify sufficient collateral for liquidation
+        (asserts! (<= collateral-to-seize borrower-collateral)
+          ERR-INSUFFICIENT-COLLATERAL
+        )
+
+        ;; Update borrower's position
+        (map-set user-debt-balance borrower remaining-debt)
+        (map-set user-last-accrual-block borrower stacks-block-height)
+        (map-set user-collateral-balance borrower
+          (- borrower-collateral collateral-to-seize)
+        )
+
+        ;; Transfer collateral to liquidator
+        (let ((liquidator-collateral (get-user-collateral tx-sender)))
+          (map-set user-collateral-balance tx-sender
+            (+ liquidator-collateral collateral-to-seize)
+          )
+        )
+
+        ;; Update global debt state
+        (var-set total-outstanding-debt
+          (- (var-get total-outstanding-debt) actual-repayment)
+        )
+
+        (ok true)
+      )
+    )
+  )
+)
+
+;; Process global interest accrual (maintenance function)
+(define-public (process-global-interest-accrual)
+  (begin
+    (asserts! (var-get protocol-initialized) ERR-PROTOCOL-NOT-INITIALIZED)
+
+    (let (
+        (current-block stacks-block-height)
+        (last-accrual-block (var-get last-global-accrual-block))
+        (blocks-elapsed (- current-block last-accrual-block))
+        (total-debt (var-get total-outstanding-debt))
+      )
+      ;; Calculate and apply global interest
+      (let ((global-interest (if (is-eq blocks-elapsed u0)
+          u0
+          (/ (* (* total-debt BASE-APR) blocks-elapsed)
+            (* PRECISION-FACTOR SECONDS-PER-YEAR)
+          )
+        )))
+        ;; Update global state
+        (var-set total-outstanding-debt (+ total-debt global-interest))
+        (var-set last-global-accrual-block current-block)
+
+        (ok true)
+      )
+    )
+  )
+)
