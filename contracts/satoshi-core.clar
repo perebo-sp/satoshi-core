@@ -206,3 +206,120 @@
     (ok true)
   )
 )
+
+;; Update Bitcoin price via oracle (owner-only for security)
+(define-public (update-btc-price (new-price uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (asserts! (var-get protocol-initialized) ERR-PROTOCOL-NOT-INITIALIZED)
+
+    ;; Prevent price manipulation attacks
+    (let (
+        (previous-price (var-get previous-btc-price-usd))
+        (price-change-ratio (if (is-eq previous-price u0)
+          u0
+          (/
+            (*
+              (if (> new-price previous-price)
+                (- new-price previous-price)
+                (- previous-price new-price)
+              )
+              PRECISION-FACTOR
+            )
+            previous-price
+          )
+        ))
+      )
+      ;; Reject extreme price changes
+      (asserts! (< price-change-ratio MAX-PRICE-DEVIATION)
+        ERR-PRICE-MANIPULATION-DETECTED
+      )
+
+      ;; Update price state
+      (var-set previous-btc-price-usd (var-get current-btc-price-usd))
+      (var-set current-btc-price-usd new-price)
+
+      (ok true)
+    )
+  )
+)
+
+;; Deposit Bitcoin collateral to protocol
+(define-public (deposit-collateral (amount uint))
+  (begin
+    (asserts! (var-get protocol-initialized) ERR-PROTOCOL-NOT-INITIALIZED)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+
+    ;; Prevent arithmetic overflow
+    (let (
+        (current-user-collateral (get-user-collateral tx-sender))
+        (new-user-collateral (+ current-user-collateral amount))
+        (current-global-collateral (var-get total-collateral-deposited))
+        (new-global-collateral (+ current-global-collateral amount))
+      )
+      ;; Overflow protection
+      (asserts! (>= new-user-collateral current-user-collateral)
+        ERR-ARITHMETIC-OVERFLOW
+      )
+      (asserts! (>= new-global-collateral current-global-collateral)
+        ERR-ARITHMETIC-OVERFLOW
+      )
+
+      ;; Update state
+      (map-set user-collateral-balance tx-sender new-user-collateral)
+      (var-set total-collateral-deposited new-global-collateral)
+
+      (ok true)
+    )
+  )
+)
+
+;; Withdraw Bitcoin collateral from protocol
+(define-public (withdraw-collateral (amount uint))
+  (begin
+    (asserts! (var-get protocol-initialized) ERR-PROTOCOL-NOT-INITIALIZED)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+
+    (let (
+        (current-collateral (get-user-collateral tx-sender))
+        (current-debt (get-user-debt tx-sender))
+      )
+      ;; Verify sufficient collateral balance
+      (asserts! (>= current-collateral amount) ERR-INSUFFICIENT-BALANCE)
+
+      ;; If user has debt, ensure adequate collateralization after withdrawal
+      (if (> current-debt u0)
+        (let (
+            (remaining-collateral (- current-collateral amount))
+            (btc-price (var-get current-btc-price-usd))
+            (remaining-collateral-value (* remaining-collateral btc-price))
+            (required-collateral-value (/ (* current-debt PRECISION-FACTOR) MAX-LTV-RATIO))
+          )
+          ;; Ensure withdrawal doesn't violate LTV requirements
+          (asserts! (>= remaining-collateral-value required-collateral-value)
+            ERR-COLLATERAL-THRESHOLD-BREACH
+          )
+
+          ;; Execute withdrawal
+          (map-set user-collateral-balance tx-sender remaining-collateral)
+          (var-set total-collateral-deposited
+            (- (var-get total-collateral-deposited) amount)
+          )
+
+          (ok true)
+        )
+        (begin
+          ;; No debt constraints, process withdrawal
+          (map-set user-collateral-balance tx-sender
+            (- current-collateral amount)
+          )
+          (var-set total-collateral-deposited
+            (- (var-get total-collateral-deposited) amount)
+          )
+
+          (ok true)
+        )
+      )
+    )
+  )
+)
