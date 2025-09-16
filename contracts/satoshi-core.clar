@@ -102,3 +102,107 @@
   principal
   uint
 )
+
+;; READ-ONLY FUNCTIONS - PROTOCOL QUERIES
+
+;; Retrieve user's collateral balance
+(define-read-only (get-user-collateral (user principal))
+  (default-to u0 (map-get? user-collateral-balance user))
+)
+
+;; Retrieve user's outstanding debt
+(define-read-only (get-user-debt (user principal))
+  (default-to u0 (map-get? user-debt-balance user))
+)
+
+;; Get current Bitcoin price from oracle
+(define-read-only (get-current-btc-price)
+  (var-get current-btc-price-usd)
+)
+
+;; Calculate user's collateralization health factor
+;; Returns: (collateral-value * precision) / (debt-value * liquidation-threshold)
+;; Health factor < 1.0 indicates liquidatable position
+(define-read-only (calculate-health-factor (user principal))
+  (let (
+      (user-collateral (get-user-collateral user))
+      (user-debt (get-user-debt user))
+      (btc-price (var-get current-btc-price-usd))
+    )
+    (if (is-eq user-debt u0)
+      (ok u0) ;; No debt position
+      (let (
+          (collateral-usd-value (* user-collateral btc-price))
+          (scaled-collateral-value (* collateral-usd-value PRECISION-FACTOR))
+          (debt-threshold-value (* user-debt LIQUIDATION-THRESHOLD))
+        )
+        (ok (/ scaled-collateral-value debt-threshold-value))
+      )
+    )
+  )
+)
+
+;; Calculate maximum borrowing capacity for user
+(define-read-only (get-borrowing-capacity (user principal))
+  (let (
+      (user-collateral (get-user-collateral user))
+      (btc-price (var-get current-btc-price-usd))
+    )
+    (/ (* user-collateral btc-price MAX-LTV-RATIO) PRECISION-FACTOR)
+  )
+)
+
+;; Check if position is eligible for liquidation
+(define-read-only (is-liquidatable (user principal))
+  (let ((health-factor-result (calculate-health-factor user)))
+    (if (is-ok health-factor-result)
+      (let ((health-factor (unwrap-panic health-factor-result)))
+        (< health-factor PRECISION-FACTOR)
+      )
+      false
+    )
+  )
+)
+
+;; Calculate accrued interest for user position
+(define-read-only (calculate-accrued-interest (user principal))
+  (let (
+      (user-debt (get-user-debt user))
+      (last-accrual-block (default-to u0 (map-get? user-last-accrual-block user)))
+      (current-block stacks-block-height)
+      (blocks-elapsed (if (is-eq last-accrual-block u0)
+        u0
+        (- current-block last-accrual-block)
+      ))
+    )
+    (if (is-eq blocks-elapsed u0)
+      u0
+      ;; Interest = principal * rate * time / (precision * blocks-per-year)
+      (/ (* (* user-debt BASE-APR) blocks-elapsed)
+        (* PRECISION-FACTOR SECONDS-PER-YEAR)
+      )
+    )
+  )
+)
+
+;; PUBLIC FUNCTIONS - PROTOCOL OPERATIONS
+
+;; Initialize protocol with initial Bitcoin price
+(define-public (initialize-protocol (initial-btc-price uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (asserts! (not (var-get protocol-initialized)) ERR-PROTOCOL-ALREADY-ACTIVE)
+
+    ;; Validate initial price parameters
+    (asserts! (> initial-btc-price u0) ERR-PRICE-VALIDATION-FAILED)
+    (asserts! (< initial-btc-price u1000000000000) ERR-PRICE-VALIDATION-FAILED)
+
+    ;; Initialize protocol state
+    (var-set current-btc-price-usd initial-btc-price)
+    (var-set previous-btc-price-usd initial-btc-price)
+    (var-set protocol-initialized true)
+    (var-set last-global-accrual-block stacks-block-height)
+
+    (ok true)
+  )
+)
