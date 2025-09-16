@@ -1,7 +1,3 @@
-Here’s a **professional README** draft for your `SatoshiCore` protocol repository. I’ve written it as if you’re presenting the project to both developers and potential contributors, keeping it clean, technical, and senior-level:
-
----
-
 # SatoshiCore – Bitcoin-Native Liquidity Engine
 
 SatoshiCore is a **revolutionary Bitcoin-native DeFi protocol** that transforms idle Bitcoin into productive capital through **secure over-collateralized lending**.
@@ -135,7 +131,3 @@ clarinet test
 ## 📜 License
 
 MIT License © 2025 – SatoshiCore Protocol
-
----
-
-👉 Shakti, I can also add a **diagram (system or contract flow)** for visuals (architecture + liquidation process). Do you want me to create an ASCII diagram for the README, or should I prepare a **proper architecture graphic** you can use in GitHub?
